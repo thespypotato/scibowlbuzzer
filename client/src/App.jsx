@@ -46,6 +46,48 @@ export default function App() {
     const id = setInterval(() => setTick(Date.now()), 200);
     return () => clearInterval(id);
   }, []);
+const buzzAudioRef = useRef(null);
+const [audioUnlocked, setAudioUnlocked] = useState(false);
+
+function playBuzzSound() {
+  const a = buzzAudioRef.current;
+  if (!a) return;
+
+  try {
+    a.currentTime = 0;
+    const p = a.play();
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch {}
+}
+useEffect(() => {
+  const a = new Audio("/buzz.mp3");
+  a.preload = "auto";
+  a.volume = 0.9; // adjust if you want
+  buzzAudioRef.current = a;
+
+  // Unlock on first user gesture (desktop + mobile)
+  const unlock = async () => {
+    try {
+      // Some browsers require a successful play() inside a gesture
+      a.muted = true;
+      await a.play();
+      a.pause();
+      a.currentTime = 0;
+      a.muted = false;
+      setAudioUnlocked(true);
+    } catch {
+      // If blocked, user can try again by clicking/tapping
+    }
+  };
+
+  window.addEventListener("pointerdown", unlock, { passive: true });
+  window.addEventListener("keydown", unlock);
+
+  return () => {
+    window.removeEventListener("pointerdown", unlock);
+    window.removeEventListener("keydown", unlock);
+  };
+}, []);
 
   // Buzz disabled shake
   const [buzzShake, setBuzzShake] = useState(false);
@@ -94,8 +136,7 @@ export default function App() {
     const prevAt = prevBuzzAtRef.current;
 
     if (!prevLocked && locked) {
-      if (at && at !== prevAt) beep();
-      if (!at) beep();
+      playBuzzSound();
     }
 
     prevBuzzLockedRef.current = locked;
