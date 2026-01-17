@@ -5,6 +5,11 @@ import { Server } from "socket.io";
 import { nanoid } from "nanoid";
 
 const app = express();
+app.use((req, _res, next) => {
+  console.log("REQ", req.method, req.url);
+  next();
+});
+
 app.use(cors({ origin: true, credentials: true }));
 app.get("/", (_, res) => res.send("ok"));
 app.get("/health", (_, res) => res.json({ ok: true }));
@@ -526,4 +531,8 @@ io.on("connection", (socket) => {
 });
 
 const PORT = process.env.PORT || 8787;
+app.use((req, res) => {
+  res.status(404).send("Not Found: " + req.path);
+});
+
 server.listen(PORT, () => console.log(`Server on http://localhost:${PORT}`));
