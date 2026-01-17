@@ -40,6 +40,9 @@ export default function App() {
   const [code, setCode] = useState("");
   const [state, setState] = useState(null);
   const [error, setError] = useState("");
+  const audioCtxRef = useRef(null);
+  const buzzBufRef = useRef(null);
+  const audioUnlockedRef = useRef(false);
 
   const [tick, setTick] = useState(Date.now());
   useEffect(() => {
@@ -50,15 +53,31 @@ const buzzAudioRef = useRef(null);
 const [audioUnlocked, setAudioUnlocked] = useState(false);
 
 function playBuzzSound() {
-  const a = buzzAudioRef.current;
-  if (!a) return;
+  const ctx = audioCtxRef.current;
+  const buf = buzzBufRef.current;
+  if (!ctx || !buf) return;
+
+  // If not unlocked yet, attempt resume (won't always work without gesture)
+  if (ctx.state === "suspended") {
+    ctx.resume().catch(() => {});
+  }
 
   try {
-    a.currentTime = 0;
-    const p = a.play();
-    if (p && typeof p.catch === "function") p.catch(() => {});
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+
+    // small gain so it isn't deafening
+    const gain = ctx.createGain();
+    gain.gain.value = 0.8;
+
+    src.connect(gain);
+    gain.connect(ctx.destination);
+
+    // start immediately (low latency)
+    src.start(0);
   } catch {}
 }
+
 useEffect(() => {
   const a = new Audio("/buzz.mp3");
   a.preload = "auto";
@@ -127,6 +146,42 @@ useEffect(() => {
       socketRef.current = null;
     };
   }, []);
+useEffect(() => {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return;
+
+  const ctx = new AudioCtx();
+  audioCtxRef.current = ctx;
+
+  // Preload + decode buzz sound
+  (async () => {
+    try {
+      const res = await fetch("/buzz.mp3");
+      const arr = await res.arrayBuffer();
+      const buf = await ctx.decodeAudioData(arr);
+      buzzBufRef.current = buf;
+    } catch (e) {
+      console.log("Buzz sound preload failed:", e);
+    }
+  })();
+
+  // Unlock/resume audio on first gesture (required in many browsers)
+  const unlock = async () => {
+    try {
+      if (ctx.state === "suspended") await ctx.resume();
+      audioUnlockedRef.current = true;
+    } catch {}
+  };
+
+  window.addEventListener("pointerdown", unlock, { passive: true });
+  window.addEventListener("keydown", unlock);
+
+  return () => {
+    window.removeEventListener("pointerdown", unlock);
+    window.removeEventListener("keydown", unlock);
+    try { ctx.close(); } catch {}
+  };
+}, []);
 
   useEffect(() => {
     const locked = !!state?.buzz?.locked;
