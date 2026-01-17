@@ -44,6 +44,10 @@ body {
   background: rgba(255,255,255,0.75);
   border: 1px solid var(--border);
   font-weight: 700;
+  <div className="muted small">
+  Sound: {audioUnlocked ? "On" : "Tap to enable"}
+</div>
+
 }
 
 .card {
