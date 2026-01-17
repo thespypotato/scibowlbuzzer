@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://127.0.0.1:8787";
+
 const getRoomFromURL = () => {
   const path = window.location.pathname.replace("/", "").trim();
   return path || null;
@@ -15,25 +16,6 @@ function teamName(teams, id) {
   return teams.find((t) => t.id === id)?.name || "Unknown";
 }
 
-function beep() {
-  try {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    const ctx = new AudioCtx();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = "square";
-    osc.frequency.value = 880;
-    gain.gain.value = 0.06;
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    setTimeout(() => {
-      osc.stop();
-      ctx.close();
-    }, 120);
-  } catch {}
-}
-
 export default function App() {
   const socketRef = useRef(null);
 
@@ -44,80 +26,12 @@ export default function App() {
   const [code, setCode] = useState("");
   const [state, setState] = useState(null);
   const [error, setError] = useState("");
-  const audioCtxRef = useRef(null);
-  const buzzBufRef = useRef(null);
-  const audioUnlockedRef = useRef(false);
 
   const [tick, setTick] = useState(Date.now());
   useEffect(() => {
     const id = setInterval(() => setTick(Date.now()), 200);
     return () => clearInterval(id);
   }, []);
-const buzzAudioRef = useRef(null);
-const [audioUnlocked, setAudioUnlocked] = useState(false);
-
-function playBuzzSound() {
-  const ctx = audioCtxRef.current;
-  const buf = buzzBufRef.current;
-  if (!ctx || !buf) return;
-
-  // If not unlocked yet, attempt resume (won't always work without gesture)
-  if (ctx.state === "suspended") {
-    ctx.resume().catch(() => {});
-  }
-
-  try {
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-
-    // small gain so it isn't deafening
-    const gain = ctx.createGain();
-    gain.gain.value = 0.8;
-
-    src.connect(gain);
-    gain.connect(ctx.destination);
-
-    // start immediately (low latency)
-    src.start(0);
-  } catch {}
-}
-
-useEffect(() => {
-  const a = new Audio("/buzz.mp3");
-  a.preload = "auto";
-  a.volume = 0.9; // adjust if you want
-  buzzAudioRef.current = a;
-
-  // Unlock on first user gesture (desktop + mobile)
-  const unlock = async () => {
-    try {
-      // Some browsers require a successful play() inside a gesture
-      a.muted = true;
-      await a.play();
-      a.pause();
-      a.currentTime = 0;
-      a.muted = false;
-      setAudioUnlocked(true);
-    } catch {
-      // If blocked, user can try again by clicking/tapping
-    }
-  };
-useEffect(() => {
-  const code = getRoomFromURL();
-  if (code && appMode === "home") {
-    setJoinCode(code.toUpperCase());
-    setAppMode("join");
-  }
-}, []);
-
-  window.addEventListener("pointerdown", unlock, { passive: true });
-  window.addEventListener("keydown", unlock);
-
-  return () => {
-    window.removeEventListener("pointerdown", unlock);
-    window.removeEventListener("keydown", unlock);
-  };
-}, []);
 
   // Buzz disabled shake
   const [buzzShake, setBuzzShake] = useState(false);
@@ -129,10 +43,67 @@ useEffect(() => {
     localStorage.setItem("sb_dark", darkMode ? "1" : "0");
   }, [darkMode]);
 
-  // buzz sound on lock
-  const prevBuzzLockedRef = useRef(false);
-  const prevBuzzAtRef = useRef(null);
+  // --- Low-latency WebAudio buzz sound ---
+  const audioCtxRef = useRef(null);
+  const buzzBufRef = useRef(null);
 
+  useEffect(() => {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+
+    const ctx = new AudioCtx();
+    audioCtxRef.current = ctx;
+
+    (async () => {
+      try {
+        const res = await fetch("/buzz.mp3");
+        const arr = await res.arrayBuffer();
+        const buf = await ctx.decodeAudioData(arr);
+        buzzBufRef.current = buf;
+      } catch (e) {
+        console.log("Buzz sound preload failed:", e);
+      }
+    })();
+
+    const unlock = async () => {
+      try {
+        if (ctx.state === "suspended") await ctx.resume();
+      } catch {}
+    };
+
+    window.addEventListener("pointerdown", unlock, { passive: true });
+    window.addEventListener("keydown", unlock);
+
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+      try { ctx.close(); } catch {}
+    };
+  }, []);
+
+  function playBuzzSound() {
+    const ctx = audioCtxRef.current;
+    const buf = buzzBufRef.current;
+    if (!ctx || !buf) return;
+
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => {});
+    }
+
+    try {
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+
+      const gain = ctx.createGain();
+      gain.gain.value = 0.8;
+
+      src.connect(gain);
+      gain.connect(ctx.destination);
+      src.start(0);
+    } catch {}
+  }
+
+  // socket setup
   useEffect(() => {
     const s = io(SERVER_URL, { transports: ["polling", "websocket"] });
     socketRef.current = s;
@@ -141,18 +112,14 @@ useEffect(() => {
       setCode(code);
       setAppMode("room");
       window.history.replaceState(null, "", `/${code}`);
-
     });
 
-   s.on("state", (st) => {
-  setState(st);
-
-  // ✅ if we’re in the room (or joining), update URL once we know the code
-  if (st?.code && window.location.pathname !== `/${st.code}`) {
-    window.history.replaceState(null, "", `/${st.code}`);
-  }
-});
-
+    s.on("state", (st) => {
+      setState(st);
+      if (st?.code && window.location.pathname !== `/${st.code}`) {
+        window.history.replaceState(null, "", `/${st.code}`);
+      }
+    });
 
     s.on("error_msg", (msg) => {
       setError(String(msg || "Error"));
@@ -164,42 +131,21 @@ useEffect(() => {
       socketRef.current = null;
     };
   }, []);
-useEffect(() => {
-  const AudioCtx = window.AudioContext || window.webkitAudioContext;
-  if (!AudioCtx) return;
 
-  const ctx = new AudioCtx();
-  audioCtxRef.current = ctx;
+  const emit = (evt, payload) => socketRef.current?.emit(evt, payload);
 
-  // Preload + decode buzz sound
-  (async () => {
-    try {
-      const res = await fetch("/buzz.mp3");
-      const arr = await res.arrayBuffer();
-      const buf = await ctx.decodeAudioData(arr);
-      buzzBufRef.current = buf;
-    } catch (e) {
-      console.log("Buzz sound preload failed:", e);
+  // Auto-open join screen if URL is /ROOMCODE
+  useEffect(() => {
+    const c = getRoomFromURL();
+    if (c) {
+      setCode(c.toUpperCase());
+      setAppMode("join");
     }
-  })();
+  }, []);
 
-  // Unlock/resume audio on first gesture (required in many browsers)
-  const unlock = async () => {
-    try {
-      if (ctx.state === "suspended") await ctx.resume();
-      audioUnlockedRef.current = true;
-    } catch {}
-  };
-
-  window.addEventListener("pointerdown", unlock, { passive: true });
-  window.addEventListener("keydown", unlock);
-
-  return () => {
-    window.removeEventListener("pointerdown", unlock);
-    window.removeEventListener("keydown", unlock);
-    try { ctx.close(); } catch {}
-  };
-}, []);
+  // play sound when a new buzz locks in
+  const prevBuzzLockedRef = useRef(false);
+  const prevBuzzAtRef = useRef(null);
 
   useEffect(() => {
     const locked = !!state?.buzz?.locked;
@@ -209,14 +155,13 @@ useEffect(() => {
     const prevAt = prevBuzzAtRef.current;
 
     if (!prevLocked && locked) {
-      playBuzzSound();
+      // server-confirmed buzz
+      if (at !== prevAt) playBuzzSound();
     }
 
     prevBuzzLockedRef.current = locked;
     prevBuzzAtRef.current = at;
   }, [state?.buzz?.locked, state?.buzz?.at]);
-
-  const emit = (evt, payload) => socketRef.current?.emit(evt, payload);
 
   const mySocketId = socketRef.current?.id || null;
   const isHost = !!(state && mySocketId && state.hostSocketId === mySocketId);
@@ -232,14 +177,12 @@ useEffect(() => {
 
   const lockedTeams = new Set(state?.tossupLockedTeams || []);
 
-  // timer
   const timer = state?.timer;
   const remainingSec =
     timer?.running && timer?.endsAtMs
       ? msToSec(timer.endsAtMs - tick)
       : msToSec(timer?.remainingMs || 0);
 
-  // canBuzz
   const canBuzz =
     !!state &&
     !isHost &&
@@ -278,7 +221,6 @@ useEffect(() => {
   const [joinSpectate, setJoinSpectate] = useState(false);
 
   const loadTeams = () => {
-    // lightweight spectator join to receive team list/state
     emit("join_room", { code, name: name || "Preview", spectate: true });
   };
 
@@ -321,7 +263,6 @@ useEffect(() => {
     emit("host_set_team_name", { code: state.code, teamId, name: nm });
   };
 
-  // roster by team
   const playersByTeam = useMemo(() => {
     const groups = new Map();
     for (const t of teams) groups.set(t.id, []);
@@ -390,7 +331,6 @@ useEffect(() => {
 
       {error ? <div className="toast">{error}</div> : null}
 
-      {/* HOME */}
       {appMode === "home" && (
         <div className="card auth">
           <h1 className="title">Science Bowl</h1>
@@ -415,7 +355,6 @@ useEffect(() => {
         </div>
       )}
 
-      {/* CREATE */}
       {appMode === "create" && (
         <div className="card auth">
           <h1 className="title">Create Room</h1>
@@ -440,7 +379,6 @@ useEffect(() => {
         </div>
       )}
 
-      {/* JOIN */}
       {appMode === "join" && (
         <div className="card auth">
           <h1 className="title">Join Room</h1>
@@ -512,7 +450,6 @@ useEffect(() => {
         </div>
       )}
 
-      {/* ROOM loading */}
       {appMode === "room" && !state && (
         <div className="card auth" style={{ marginTop: 12 }}>
           <h2>Loading room…</h2>
@@ -520,15 +457,12 @@ useEffect(() => {
         </div>
       )}
 
-      {/* ROOM */}
       {appMode === "room" && state && (
         <>
           <main className="main">
             <section
               className="teams"
-              style={{
-                gridTemplateColumns: teams.length <= 2 ? undefined : "repeat(2, 1fr)"
-              }}
+              style={{ gridTemplateColumns: teams.length <= 2 ? undefined : "repeat(2, 1fr)" }}
             >
               {teams.map((t, idx) => {
                 const teamPlayers = playersByTeam.get(t.id) || [];
@@ -673,7 +607,6 @@ useEffect(() => {
             </section>
           </main>
 
-          {/* SCOREBOARD (per toss-up deltas; blanks instead of 0) */}
           <section className="scoreboard card">
             <div className="scoreboard-title">Scoreboard</div>
 
@@ -724,7 +657,7 @@ useEffect(() => {
             </div>
 
             <div className="muted small" style={{ marginTop: 8 }}>
-              P/TU/B are per-toss-up point gains; Score is running total after that toss-up.
+
             </div>
           </section>
         </>
