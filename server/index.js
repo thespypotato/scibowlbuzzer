@@ -431,15 +431,14 @@ io.on("connection", (socket) => {
 
     if (interrupt) {
       // NEG: +4 to other team (counts under P for benefiting team)
-      const otherId = otherTeamId(room, teamId);
-      if (otherId) {
-        const other = room.teams.get(otherId);
-        if (other) {
-          other.score += 4;
-          addRowDelta(room, otherId, "p", 4);
-          refreshRowScores(room);
-        }
-      }
+      // NEG: +4 to EVERY other team (counts under P for each benefiting team)
+for (const [otherId, other] of room.teams.entries()) {
+  if (otherId === teamId) continue;
+  other.score += 4;
+  addRowDelta(room, otherId, "p", 4);
+}
+refreshRowScores(room);
+
 
       clearTossupEndTimeout(room);
 
