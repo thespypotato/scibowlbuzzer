@@ -6,7 +6,9 @@ import { nanoid } from "nanoid";
 
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
+app.get("/", (_, res) => res.send("ok"));
 app.get("/health", (_, res) => res.json({ ok: true }));
+
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: true, credentials: true } });
