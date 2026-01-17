@@ -2,6 +2,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://127.0.0.1:8787";
+const getRoomFromURL = () => {
+  const path = window.location.pathname.replace("/", "").trim();
+  return path || null;
+};
 
 function msToSec(ms) {
   return Math.max(0, Math.ceil(ms / 1000));
@@ -98,6 +102,13 @@ useEffect(() => {
       // If blocked, user can try again by clicking/tapping
     }
   };
+useEffect(() => {
+  const code = getRoomFromURL();
+  if (code && appMode === "home") {
+    setJoinCode(code.toUpperCase());
+    setAppMode("join");
+  }
+}, []);
 
   window.addEventListener("pointerdown", unlock, { passive: true });
   window.addEventListener("keydown", unlock);
@@ -129,12 +140,19 @@ useEffect(() => {
     s.on("room_created", ({ code }) => {
       setCode(code);
       setAppMode("room");
+      window.history.replaceState(null, "", `/${code}`);
+
     });
 
-    // IMPORTANT: always set the entire state object from server
-    s.on("state", (st) => {
-      setState(st);
-    });
+   s.on("state", (st) => {
+  setState(st);
+
+  // ✅ if we’re in the room (or joining), update URL once we know the code
+  if (st?.code && window.location.pathname !== `/${st.code}`) {
+    window.history.replaceState(null, "", `/${st.code}`);
+  }
+});
+
 
     s.on("error_msg", (msg) => {
       setError(String(msg || "Error"));
