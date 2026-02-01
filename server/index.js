@@ -273,14 +273,13 @@ socket.on("peek_room", ({ code }) => {
     socket.emit("error_msg", "Room not found.");
     return;
   }
-
-  // Send minimal info WITHOUT modifying players
   socket.emit("room_peek", {
     code: room.code,
     roomName: room.roomName,
-    teams: [...room.teams.values()].map(t => ({ id: t.id, name: t.name }))
+    teams: [...room.teams.values()].map((t) => ({ id: t.id, name: t.name }))
   });
 });
+
 
   socket.on("host_set_room_name", ({ code, roomName }) => {
     code = String(code || "").toUpperCase().trim();
