@@ -3,7 +3,7 @@
   --card: #ffffff;
 
   --border: rgba(20, 30, 60, 0.10);
-  --border-strong: rgba(20, 30, 60, 0.22); /* 👈 ADD THIS */
+  --border-strong: rgba(20, 30, 60, 0.28); 
 
   --shadow: 0 10px 25px rgba(0,0,0,0.08);
   --muted: rgba(20, 30, 60, 0.55);
