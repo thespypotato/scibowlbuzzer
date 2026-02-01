@@ -145,6 +145,32 @@ function refreshRowScores(room) {
     if (row.teams[id]) row.teams[id].score = t.score;
   }
 }
+function recomputeFromRows(room) {
+  // Reset team scores
+  for (const t of room.teams.values()) {
+    t.score = 0;
+  }
+
+  // Replay remaining rows in order
+  for (const row of room.match.rows) {
+    for (const [teamId, delta] of Object.entries(row.teams)) {
+      const t = room.teams.get(teamId);
+      if (!t) continue;
+
+      const p = Number(delta.p || 0);
+      const tu = Number(delta.tu || 0);
+      const b = Number(delta.b || 0);
+
+      t.score += p + tu + b;
+    }
+
+    // Update snapshot scores for this row
+    for (const [teamId, t] of room.teams.entries()) {
+      if (!row.teams[teamId]) row.teams[teamId] = { p: 0, tu: 0, b: 0, score: 0 };
+      row.teams[teamId].score = t.score;
+    }
+  }
+}
 
 /* ---------------- Buzz helpers ---------------- */
 function clearBuzz(room) {
@@ -240,6 +266,21 @@ io.on("connection", (socket) => {
     socket.emit("room_created", { code });
     broadcast(room);
   });
+socket.on("peek_room", ({ code }) => {
+  code = String(code || "").toUpperCase().trim();
+  const room = rooms.get(code);
+  if (!room) {
+    socket.emit("error_msg", "Room not found.");
+    return;
+  }
+
+  // Send minimal info WITHOUT modifying players
+  socket.emit("room_peek", {
+    code: room.code,
+    roomName: room.roomName,
+    teams: [...room.teams.values()].map(t => ({ id: t.id, name: t.name }))
+  });
+});
 
   socket.on("host_set_room_name", ({ code, roomName }) => {
     code = String(code || "").toUpperCase().trim();
@@ -262,11 +303,39 @@ io.on("connection", (socket) => {
     t.name = nm;
     broadcast(room);
   });
+  socket.on("host_delete_tossup_row", ({ code, num }) => {
+    code = String(code || "").toUpperCase().trim();
+    const room = requireRoom(code, socket);
+    if (!room || !requireHost(room, socket)) return;
+
+    if (!room.match || !Array.isArray(room.match.rows)) return;
+
+    const n = Number(num);
+    if (!Number.isFinite(n)) return;
+
+    const idx = room.match.rows.findIndex((r) => r.num === n);
+    if (idx === -1) return;
+
+    // Remove that toss-up row
+    room.match.rows.splice(idx, 1);
+
+    // Recompute team scores + row score snapshots
+    recomputeFromRows(room);
+
+    broadcast(room);
+  });
 
   socket.on("join_room", ({ code, name, teamId, spectate }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
+    
     if (!room) return;
+    const existing = room.players.get(socket.id);
+if (existing && existing.isHost) {
+  // Never overwrite the host record
+  return;
+}
+
     socket.join(code);
 
     const nm = (String(name || "Player").trim() || "Player").slice(0, 24);

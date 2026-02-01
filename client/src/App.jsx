@@ -125,6 +125,9 @@ export default function App() {
       setError(String(msg || "Error"));
       setTimeout(() => setError(""), 3000);
     });
+    s.on("room_peek", (info) => {
+      setPeek(info);
+    });
 
     return () => {
       s.disconnect();
@@ -219,10 +222,13 @@ export default function App() {
   // ---------- Join Wizard ----------
   const [joinTeamId, setJoinTeamId] = useState("");
   const [joinSpectate, setJoinSpectate] = useState(false);
+  const [peek, setPeek] = useState(null);
 
   const loadTeams = () => {
-    emit("join_room", { code, name: name || "Preview", spectate: true });
+    setPeek(null);
+    emit("peek_room", { code });
   };
+
 
   const doJoin = () => {
     emit("join_room", {
@@ -297,7 +303,7 @@ export default function App() {
           <div className="clock-title">{state ? clockStatus : "Science Bowl"}</div>
           <div className="clock-sub">
             Timer: <b>{state ? `${remainingSec}s` : "—"}</b>{" "}
-            <span className="muted">({state?.timer?.mode || "stopped"})</span>
+            <span className="muted">({peek?.timer?.mode || "stopped"})</span>
           </div>
         </div>
 
@@ -371,6 +377,13 @@ export default function App() {
             value={createTeams}
             onChange={(e) => setCreateTeams(e.target.value)}
           />
+          <label className="label">Your name</label>
+            <input
+              className="input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Your Name"
+            />
 
           <div className="host-actions" style={{ marginTop: 12 }}>
             <button className="btn" onClick={doCreate}>Create</button>
@@ -382,7 +395,13 @@ export default function App() {
       {appMode === "join" && (
         <div className="card auth">
           <h1 className="title">Join Room</h1>
-
+          <label className="label">Your name</label>
+<input
+  className="input"
+  value={name}
+  onChange={(e) => setName(e.target.value)}
+  placeholder="Your Name"
+/>
           <label className="label">Room code</label>
           <input
             className="input"
@@ -433,7 +452,7 @@ export default function App() {
                     onChange={(e) => setJoinTeamId(e.target.value)}
                   >
                     <option value="">Select…</option>
-                    {state.teams.map((t) => (
+                    {peek.teams.map((t) => (
                       <option key={t.id} value={t.id}>{t.name}</option>
                     ))}
                   </select>
@@ -449,6 +468,7 @@ export default function App() {
           ) : null}
         </div>
       )}
+
 
       {appMode === "room" && !state && (
         <div className="card auth" style={{ marginTop: 12 }}>
@@ -637,7 +657,24 @@ export default function App() {
                 <tbody>
                   {(state.match?.rows || []).map((row) => (
                     <tr key={row.num}>
-                      <td className="sticky-col rownum">{row.num}</td>
+                      <td className="sticky-col rownum">
+                        {row.num}
+                        {isHost ? (
+                          <button
+                            className="btn btn-soft"
+                            style={{ marginLeft: 8, padding: "4px 8px" }}
+                            onClick={() => {
+                              if (confirm(`Delete toss-up #${row.num}?`)) {
+                                emit("host_delete_tossup_row", { code: state.code, num: row.num });
+                              }
+                            }}
+                            title="Delete this toss-up"
+                          >
+                            ✕
+                          </button>
+                        ) : null}
+                      </td>
+
 
                       {teams.map((t) => {
                         const v = row.teams?.[t.id] || {};
