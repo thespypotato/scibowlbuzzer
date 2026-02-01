@@ -436,7 +436,7 @@ export default function App() {
             </button>
           </div>
 
-          {state?.teams?.length ? (
+          {peek?.teams?.length ? (
             <>
               <div style={{ marginTop: 12 }}>
                 <label className="label">Join mode</label>
