@@ -1,11 +1,15 @@
 :root {
   --bg: #eef5ff;
   --card: #ffffff;
+
   --border: rgba(20, 30, 60, 0.10);
+  --border-strong: rgba(20, 30, 60, 0.22); /* 👈 ADD THIS */
+
   --shadow: 0 10px 25px rgba(0,0,0,0.08);
   --muted: rgba(20, 30, 60, 0.55);
   --winner: #e7f7ff;
 }
+
 
 * { box-sizing: border-box; }
 body {
@@ -23,7 +27,7 @@ body {
   gap: 12px;
   align-items: center;
   background: #bfeeff;
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border-strong);
   border-radius: 14px;
   padding: 14px 16px;
   box-shadow: var(--shadow);
@@ -42,25 +46,23 @@ body {
   padding: 6px 10px;
   border-radius: 999px;
   background: rgba(255,255,255,0.75);
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border-strong);
   font-weight: 700;
-  <div className="muted small">
-  Sound: {audioUnlocked ? "On" : "Tap to enable"}
-</div>
-
+  
 }
 
 .card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 14px;
+  background: var(--card-bg);
+  border: 1.5px solid var(--border-strong);
   box-shadow: var(--shadow);
+  border-radius: 12px;
+  padding: 16px;
 }
+
 
 .auth .title { margin: 0 0 10px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.panel { border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: rgba(255,255,255,0.75); }
+.panel { border: 1.5px solid var(--border-strong);; border-radius: 12px; padding: 12px; background: rgba(255,255,255,0.75); }
 .row { margin-bottom: 10px; }
 
 .label { display:block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
@@ -68,14 +70,14 @@ body {
   width: 100%;
   padding: 10px 12px;
   border-radius: 12px;
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border-strong);
   background: #fff;
 }
 
 .btn {
   padding: 10px 12px;
   border-radius: 12px;
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border-strong);
   background: #0f214d;
   color: #fff;
   font-weight: 800;
@@ -120,7 +122,7 @@ body {
 .teams { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .teamcard {
   border-radius: 16px;
-  border: 1px solid var(--border);
+  border: 2px solid var(--border-strong);
   background: var(--card);
   box-shadow: var(--shadow);
   overflow: hidden;
@@ -131,7 +133,7 @@ body {
   align-items: center;
   padding: 14px 14px;
   font-weight: 900;
-  border-bottom: 1px solid var(--border);
+  border: 1.5px solid var(--border-strong);
 }
 .team-title { font-size: 18px; }
 .team-score { font-size: 22px; }
@@ -144,7 +146,7 @@ body {
   align-items: center;
   padding: 10px 12px;
   border-radius: 14px;
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border-strong);
   background: rgba(255,255,255,0.85);
 }
 .playername { font-weight: 700; }
@@ -155,7 +157,7 @@ body {
 .locktag {
   font-size: 11px;
   color: rgba(0,0,0,0.55);
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border-strong);
   padding: 4px 8px;
   border-radius: 999px;
   background: rgba(255,255,255,0.7);
@@ -165,7 +167,7 @@ body {
 .hostbox { margin-top: 10px; display:flex; flex-direction: column; gap: 12px; }
 .host-actions { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
 .buzzpanel {
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border-strong);
   border-radius: 14px;
   padding: 12px;
   background: rgba(255,255,255,0.8);
