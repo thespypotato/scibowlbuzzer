@@ -266,19 +266,25 @@ io.on("connection", (socket) => {
     socket.emit("room_created", { code });
     broadcast(room);
   });
-socket.on("peek_room", ({ code }) => {
+socket.on("peek_room", ({ code }, ack) => {
   code = String(code || "").toUpperCase().trim();
   const room = rooms.get(code);
+
   if (!room) {
-    socket.emit("error_msg", "Room not found.");
+    if (typeof ack === "function") ack({ ok: false, error: "Room not found." });
     return;
   }
-  socket.emit("room_peek", {
+
+  const payload = {
+    ok: true,
     code: room.code,
     roomName: room.roomName,
     teams: [...room.teams.values()].map((t) => ({ id: t.id, name: t.name }))
-  });
+  };
+
+  if (typeof ack === "function") ack(payload);
 });
+
 
 
   socket.on("host_set_room_name", ({ code, roomName }) => {
