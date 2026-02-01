@@ -127,6 +127,7 @@ export default function App() {
     });
     s.on("room_peek", (info) => {
       setPeek(info);
+      console.log("PEEK", info);
     });
 
     return () => {
@@ -225,9 +226,21 @@ export default function App() {
   const [peek, setPeek] = useState(null);
 
   const loadTeams = () => {
-    setPeek(null);
-    emit("peek_room", { code });
-  };
+  setPeek(null);
+
+  const s = socketRef.current;
+  if (!s) return;
+
+  s.emit("peek_room", { code }, (resp) => {
+    if (!resp?.ok) {
+      setError(resp?.error || "Failed to load teams.");
+      setTimeout(() => setError(""), 3000);
+      return;
+    }
+    setPeek(resp);
+  });
+};
+
 
 
   const doJoin = () => {
