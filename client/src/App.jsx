@@ -39,7 +39,6 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
-  // Buzz disabled shake
   const [buzzShake, setBuzzShake] = useState(false);
 
   // Dark mode
@@ -83,9 +82,7 @@ export default function App() {
     return () => {
       window.removeEventListener("pointerdown", unlock);
       window.removeEventListener("keydown", unlock);
-      try {
-        ctx.close();
-      } catch {}
+      try { ctx.close(); } catch {}
     };
   }, []);
 
@@ -93,9 +90,7 @@ export default function App() {
     const ctx = audioCtxRef.current;
     const buf = buzzBufRef.current;
     if (!ctx || !buf) return;
-
     if (ctx.state === "suspended") ctx.resume().catch(() => {});
-
     try {
       const src = ctx.createBufferSource();
       src.buffer = buf;
@@ -113,7 +108,6 @@ export default function App() {
 
   const [socketReady, setSocketReady] = useState(false);
 
-  // socket setup
   useEffect(() => {
     const s = io(SERVER_URL, {
       transports: ["polling", "websocket"],
@@ -194,7 +188,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socketReady]);
 
-  // play sound when a new buzz locks in
+  // play sound when new buzz locks
   const prevBuzzLockedRef = useRef(false);
   const prevBuzzAtRef = useRef(null);
 
@@ -220,11 +214,10 @@ export default function App() {
   const players = state?.players || [];
   const phase = state?.phase || "lobby";
 
-  // ✅ your new rules:
-  // - button turns color whenever NOT tossup_closed
-  // - also disabled whenever NOT tossup_closed
-  const canStartNewTossup = phase === "tossup_closed";
-  const startBtnActive = !canStartNewTossup; // highlight when not closed
+  // “Start Toss-Up” should be clickable in lobby/clock-stopped, and also in tossup_closed.
+  const canStartNewTossup = !phase.startsWith("bonus") && (phase === "lobby" || phase === "tossup_closed");
+  // Color it when NOT idle (anything besides lobby/tossup_closed)
+  const startIsActive = !(phase === "lobby" || phase === "tossup_closed");
 
   const me = useMemo(() => {
     if (!mySocketId) return null;
@@ -279,7 +272,6 @@ export default function App() {
 
   const loadTeams = () => {
     setPeek(null);
-
     const s = socketRef.current;
     if (!s) return;
 
@@ -303,19 +295,40 @@ export default function App() {
     setAppMode("room");
   };
 
-  // ---------- Host Actions ----------
-  const startTossup = () => emit("host_start_tossup_reading", { code: state.code });
-  const doneReadingTossup = () => emit("host_done_reading_tossup", { code: state.code });
+  // ---------- Host Actions (include hostKey for auth) ----------
+  const hostKey = getHostKeyFromURL() || localStorage.getItem(`sb_hostkey_${state?.code || ""}`) || null;
 
-  const resetBuzzer = () => emit("host_clear_buzz", { code: state.code });
+  const startTossup = () => emit("host_start_tossup_reading", { code: state.code, hostKey });
+  const doneReadingTossup = () => emit("host_done_reading_tossup", { code: state.code, hostKey });
+
+  const resetBuzzer = () => emit("host_clear_buzz", { code: state.code, hostKey });
   const chooseInterrupt = (interrupt) =>
-    emit("host_set_interrupt_choice", { code: state.code, interrupt });
+    emit("host_set_interrupt_choice", { code: state.code, interrupt, hostKey });
   const markAnswer = (correct) =>
-    emit("host_mark_answer", { code: state.code, correct });
+    emit("host_mark_answer", { code: state.code, correct, hostKey });
 
-  const doneReadingBonus = () => emit("host_done_reading_bonus", { code: state.code });
-  const awardBonus = (points) => emit("host_award_bonus", { code: state.code, points });
-  const skipBonus = () => emit("host_skip_bonus", { code: state.code });
+  const doneReadingBonus = () => emit("host_done_reading_bonus", { code: state.code, hostKey });
+  const awardBonus = (points) => emit("host_award_bonus", { code: state.code, points, hostKey });
+  const skipBonus = () => emit("host_skip_bonus", { code: state.code, hostKey });
+
+  // Done-reading clicked styles
+  const [tuDoneClicked, setTuDoneClicked] = useState(false);
+  const [bonusDoneClicked, setBonusDoneClicked] = useState(false);
+
+  useEffect(() => {
+    if (phase !== "tossup_live") setTuDoneClicked(false);
+    if (phase !== "bonus_live") setBonusDoneClicked(false);
+  }, [phase]);
+
+  const onDoneReadingTossup = () => {
+    setTuDoneClicked(true);
+    doneReadingTossup();
+  };
+
+  const onDoneReadingBonus = () => {
+    setBonusDoneClicked(true);
+    doneReadingBonus();
+  };
 
   // Team rename drafts for host
   const [teamNameDrafts, setTeamNameDrafts] = useState({});
@@ -329,7 +342,7 @@ export default function App() {
   const saveTeamName = (teamId) => {
     const nm = String(teamNameDrafts[teamId] || "").trim();
     if (!nm) return;
-    emit("host_set_team_name", { code: state.code, teamId, name: nm });
+    emit("host_set_team_name", { code: state.code, teamId, name: nm, hostKey });
   };
 
   const playersByTeam = useMemo(() => {
@@ -384,7 +397,30 @@ export default function App() {
 
         <div className="topbar-center">
           <div className="roomname-view">{state?.roomName || peek?.roomName || "—"}</div>
-          <div className="roomcode">{state ? <>Code: <b>{state.code}</b></> : null}</div>
+          <div className="roomcode">
+            {state ? (
+              <>
+                Code: <b>{state.code}</b>
+                <button
+                  className="copybtn"
+                  onClick={async () => {
+                    const link = `https://scibowlbuzzer.netlify.app/${state.code}`;
+                    try {
+                      await navigator.clipboard.writeText(link);
+                      setError("Copied link!");
+                      setTimeout(() => setError(""), 1200);
+                    } catch {
+                      window.prompt("Copy this link:", link);
+                    }
+                  }}
+                  title="Copy room link"
+                  type="button"
+                >
+                  Copy link
+                </button>
+              </>
+            ) : null}
+          </div>
         </div>
 
         <div className="topbar-right">
@@ -555,19 +591,18 @@ export default function App() {
       )}
 
       {appMode === "room" && state && (
-        <>
-          <main className="main">
-            <section className="teams">
-              {teams.map((t, idx) => {
+        <main className="main">
+          <div className="leftcol">
+            <section
+              className="teams"
+              style={{ gridTemplateColumns: teams.length <= 2 ? undefined : "repeat(2, 1fr)" }}
+            >
+              {teams.map((t) => {
                 const teamPlayers = playersByTeam.get(t.id) || [];
                 const isWinnerTeam = !!winnerTeamId && winnerTeamId === t.id;
 
                 return (
-                  <div
-                    key={t.id}
-                    className={`teamcard ${isWinnerTeam ? "team-winner" : ""}`}
-                    data-team-index={idx}
-                  >
+                  <div key={t.id} className={`teamcard ${isWinnerTeam ? "team-winner" : ""}`}>
                     <div className="teamcard-header">
                       <div className="team-title">
                         {isHost ? (
@@ -614,125 +649,19 @@ export default function App() {
               })}
             </section>
 
-            <section className="controls">
-              <div className="card">
-                <div className="controls-top">
-                  <button
-                    className={`btn btn-buzz ${buzzShake ? "buzz-shake" : ""}`}
-                    onClick={() => {
-                      if (!canBuzz) {
-                        setBuzzShake(true);
-                        setTimeout(() => setBuzzShake(false), 350);
-                        return;
-                      }
-                      emit("buzz", { code: state?.code });
-                    }}
-                    disabled={!canBuzz}
-                  >
-                    BUZZ <span className="muted small" style={{ marginLeft: 8 }}>(Space)</span>
-                  </button>
+            {/* SCOREBOARD under teams */}
+            <section className={`scoreboard card ${scoreboardOpen ? "open" : "closed"}`}>
+              <button
+                className="scoreboard-toggle"
+                onClick={() => setScoreboardOpen((v) => !v)}
+                aria-expanded={scoreboardOpen}
+                title="Toggle scoreboard"
+              >
+                <span>Scoreboard</span>
+                <span className="scoreboard-caret">{scoreboardOpen ? "▾" : "▸"}</span>
+              </button>
 
-                  <div className="muted small">
-                    {phase === "tossup_closed"
-                      ? "Buzzing off (time expired)"
-                      : phase.startsWith("bonus")
-                        ? "Buzzing off (bonus)"
-                        : canBuzz
-                          ? "Buzzing on"
-                          : me?.isSpectator
-                            ? "Spectating (no buzz)"
-                            : "Buzz disabled"}
-                  </div>
-                </div>
-
-                {isHost ? (
-                  <div className="hostbox">
-                    <div className="host-actions">
-                      <button
-                        className={`btn ${startBtnActive ? "btn-live" : ""}`}
-                        onClick={startTossup}
-                        disabled={!canStartNewTossup}
-                        title={!canStartNewTossup ? "Start is enabled only when Toss-Up is closed." : "Start a new toss-up"}
-                      >
-                        Start Toss-Up
-                      </button>
-
-                      <button
-                        className="btn btn-soft"
-                        onClick={doneReadingTossup}
-                        disabled={phase.startsWith("bonus")}
-                      >
-                        Done Reading Toss-Up
-                      </button>
-
-                      <button className="btn btn-soft" onClick={backToHome} title="Leave to main menu">
-                        Main Menu
-                      </button>
-                    </div>
-
-                    {buzzLocked ? (
-                      <div className="buzzpanel">
-                        <div className="buzzline">
-                          Buzzed: <b>{state.buzz.winnerName}</b>{" "}
-                          <span className="muted">({teamName(teams, winnerTeamId)})</span>
-                        </div>
-
-                        <button className="btn btn-soft" onClick={resetBuzzer}>Reset Buzzer</button>
-
-                        {interruptChoice === null ? (
-                          <div className="host-actions">
-                            <button className="btn" onClick={() => chooseInterrupt(true)}>Interrupt</button>
-                            <button className="btn btn-soft" onClick={() => chooseInterrupt(false)}>Not interrupt</button>
-                          </div>
-                        ) : (
-                          <div className="host-actions">
-                            <div className="muted small">
-                              Choice: <b>{interruptChoice ? "Interrupt" : "Not interrupt"}</b>
-                            </div>
-                            <button className="btn" onClick={() => markAnswer(true)}>Correct</button>
-                            <button className="btn btn-soft" onClick={() => markAnswer(false)}>Incorrect</button>
-                          </div>
-                        )}
-                      </div>
-                    ) : null}
-
-                    {phase.startsWith("bonus") ? (
-                      <div className="buzzpanel">
-                        <div className="buzzline">
-                          BONUS for <b>{teamName(teams, state.activeBonusTeamId)}</b>
-                        </div>
-
-                        <div className="host-actions">
-                          <button className="btn" onClick={doneReadingBonus}>Done Reading Bonus (start 20s)</button>
-                          <button className="btn" onClick={() => awardBonus(10)}>Correct</button>
-                          <button className="btn btn-soft" onClick={() => awardBonus(0)}>Incorrect</button>
-                          <button className="btn btn-soft" onClick={skipBonus}>Skip</button>
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : (
-                  <div className="host-actions" style={{ marginTop: 12 }}>
-                    <button className="btn btn-soft" onClick={backToHome}>Main Menu</button>
-                  </div>
-                )}
-              </div>
-            </section>
-          </main>
-
-          <section className={`scoreboard card ${scoreboardOpen ? "open" : "closed"}`}>
-            <button
-              className="scoreboard-toggle"
-              onClick={() => setScoreboardOpen((v) => !v)}
-              aria-expanded={scoreboardOpen}
-              title="Toggle scoreboard"
-            >
-              <span>Scoreboard</span>
-              <span className="scoreboard-caret">{scoreboardOpen ? "▾" : "▸"}</span>
-            </button>
-
-            {scoreboardOpen ? (
-              <>
+              {scoreboardOpen ? (
                 <div className="scoreboard-scroll">
                   <table className="scoreboard-table">
                     <thead>
@@ -768,7 +697,7 @@ export default function App() {
                                 style={{ marginLeft: 8, padding: "4px 8px" }}
                                 onClick={() => {
                                   if (confirm(`Delete toss-up #${row.num}?`)) {
-                                    emit("host_delete_tossup_row", { code: state.code, num: row.num });
+                                    emit("host_delete_tossup_row", { code: state.code, num: row.num, hostKey });
                                   }
                                 }}
                                 title="Delete this toss-up"
@@ -794,10 +723,131 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
-              </>
-            ) : null}
+              ) : null}
+            </section>
+          </div>
+
+          <section className="controls">
+            <div className="card">
+              <div className="controls-top">
+                <button
+                  className={`btn btn-buzz ${buzzShake ? "buzz-shake" : ""}`}
+                  onClick={() => {
+                    if (!canBuzz) {
+                      setBuzzShake(true);
+                      setTimeout(() => setBuzzShake(false), 350);
+                      return;
+                    }
+                    emit("buzz", { code: state?.code });
+                  }}
+                  disabled={!canBuzz}
+                >
+                  BUZZ <span className="muted small" style={{ marginLeft: 8 }}>(Space)</span>
+                </button>
+
+                <div className="muted small">
+                  {phase === "tossup_closed"
+                    ? "Buzzing off (time expired)"
+                    : phase.startsWith("bonus")
+                      ? "Buzzing off (bonus)"
+                      : canBuzz
+                        ? "Buzzing on"
+                        : me?.isSpectator
+                          ? "Spectating (no buzz)"
+                          : "Buzz disabled"}
+                </div>
+              </div>
+
+              {isHost ? (
+                <div className="hostbox">
+                  <div className="host-actions">
+                    <button
+                      className={`btn ${startIsActive ? "btn-live" : ""}`}
+                      onClick={() => {
+                        setTuDoneClicked(false);
+                        setBonusDoneClicked(false);
+                        startTossup();
+                      }}
+                      disabled={!canStartNewTossup}
+                      title={!canStartNewTossup ? "Finish the current toss-up/bonus first" : "Start a new toss-up"}
+                    >
+                      Start Toss-Up
+                    </button>
+
+                    <button
+                      className={`btn btn-soft ${tuDoneClicked ? "btn-done" : ""}`}
+                      onClick={() => {
+                        setTuDoneClicked(true);
+                        onDoneReadingTossup();
+                      }}
+                      disabled={phase.startsWith("bonus") || phase === "lobby"}
+                      title={phase === "lobby" ? "Start a toss-up first" : "Start the 5s timer"}
+                    >
+                      Done Reading Toss-Up
+                    </button>
+
+                    <button className="btn btn-soft" onClick={backToHome} title="Leave to main menu">
+                      Main Menu
+                    </button>
+                  </div>
+
+                  {buzzLocked ? (
+                    <div className="buzzpanel">
+                      <div className="buzzline">
+                        Buzzed: <b>{state.buzz.winnerName}</b>{" "}
+                        <span className="muted">({teamName(teams, winnerTeamId)})</span>
+                      </div>
+
+                      <button className="btn btn-soft" onClick={resetBuzzer}>Reset Buzzer</button>
+
+                      {interruptChoice === null ? (
+                        <div className="host-actions">
+                          <button className="btn" onClick={() => chooseInterrupt(true)}>Interrupt</button>
+                          <button className="btn btn-soft" onClick={() => chooseInterrupt(false)}>Not interrupt</button>
+                        </div>
+                      ) : (
+                        <div className="host-actions">
+                          <div className="muted small">
+                            Choice: <b>{interruptChoice ? "Interrupt" : "Not interrupt"}</b>
+                          </div>
+                          <button className="btn" onClick={() => markAnswer(true)}>Correct</button>
+                          <button className="btn btn-soft" onClick={() => markAnswer(false)}>Incorrect</button>
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+
+                  {phase.startsWith("bonus") ? (
+                    <div className="buzzpanel">
+                      <div className="buzzline">
+                        BONUS for <b>{teamName(teams, state.activeBonusTeamId)}</b>
+                      </div>
+
+                      <div className="host-actions">
+                        <button
+                          className={`btn ${bonusDoneClicked ? "btn-done" : ""}`}
+                          onClick={() => {
+                            setBonusDoneClicked(true);
+                            onDoneReadingBonus();
+                          }}
+                        >
+                          Done Reading Bonus (start 20s)
+                        </button>
+                        <button className="btn" onClick={() => awardBonus(10)}>Correct</button>
+                        <button className="btn btn-soft" onClick={() => awardBonus(0)}>Incorrect</button>
+                        <button className="btn btn-soft" onClick={skipBonus}>Skip</button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="host-actions" style={{ marginTop: 12 }}>
+                  <button className="btn btn-soft" onClick={backToHome}>Main Menu</button>
+                </div>
+              )}
+            </div>
           </section>
-        </>
+        </main>
       )}
     </div>
   );

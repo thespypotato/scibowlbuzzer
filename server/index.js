@@ -3,9 +3,9 @@ import http from "http";
 import cors from "cors";
 import { Server } from "socket.io";
 import { nanoid } from "nanoid";
-import crypto from "crypto";
 
 const app = express();
+
 app.use((req, _res, next) => {
   console.log("REQ", req.method, req.url);
   next();
@@ -21,6 +21,9 @@ const io = new Server(server, { cors: { origin: true, credentials: true } });
 const DEFAULT_TOSSUP_SECONDS = 5;
 const DEFAULT_BONUS_SECONDS = 20;
 
+// If host disconnects, keep room alive for this long to allow host rejoin
+const HOST_GRACE_MS = 10 * 60 * 1000;
+
 const rooms = new Map();
 const now = () => Date.now();
 
@@ -31,18 +34,20 @@ function genCode() {
   return code;
 }
 
-function genHostKey() {
-  return crypto.randomBytes(16).toString("hex"); // secret host reclaim token
-}
-
 function requireRoom(code, socket) {
   const room = rooms.get(code);
   if (!room) socket.emit("error_msg", "Room not found.");
   return room || null;
 }
 
-function requireHost(room, socket) {
-  if (room.hostSocketId !== socket.id) {
+function isHost(room, socket, hostKey) {
+  if (room.hostSocketId === socket.id) return true;
+  if (hostKey && room.hostKey && hostKey === room.hostKey) return true;
+  return false;
+}
+
+function requireHost(room, socket, hostKey) {
+  if (!isHost(room, socket, hostKey)) {
     socket.emit("error_msg", "Host only.");
     return false;
   }
@@ -99,7 +104,6 @@ function scheduleTossupEnd(room) {
     if (!r) return;
 
     const remaining = Math.max(0, r.timer.endsAtMs - now());
-    // Only close buzz if still live, timer ended, and no active buzz (buzz pauses clock)
     if (r.phase === "tossup_live" && remaining === 0 && !r.buzz.locked) {
       r.phase = "tossup_closed";
       r.timer.running = false;
@@ -151,10 +155,8 @@ function refreshRowScores(room) {
 }
 
 function recomputeFromRows(room) {
-  // Reset team scores
   for (const t of room.teams.values()) t.score = 0;
 
-  // Replay remaining rows in order
   for (const row of room.match.rows) {
     for (const [teamId, delta] of Object.entries(row.teams)) {
       const t = room.teams.get(teamId);
@@ -167,7 +169,6 @@ function recomputeFromRows(room) {
       t.score += p + tu + b;
     }
 
-    // Update snapshot scores for this row
     for (const [teamId, t] of room.teams.entries()) {
       if (!row.teams[teamId]) row.teams[teamId] = { p: 0, tu: 0, b: 0, score: 0 };
       row.teams[teamId].score = t.score;
@@ -205,7 +206,7 @@ function publicState(room) {
   return {
     code: room.code,
     roomName: room.roomName,
-    hostSocketId: room.hostSocketId, // current live host socket (can be null if host offline)
+    hostSocketId: room.hostSocketId,
     settings: room.settings,
     teams,
     players,
@@ -226,20 +227,19 @@ function broadcast(room) {
 io.on("connection", (socket) => {
   socket.on("create_room", ({ hostName, roomName, numTeams }) => {
     const code = genCode();
-    const rn = String(roomName || "").trim().slice(0, 40) || `Room ${code}`;
+    const hostKey = nanoid(24);
 
+    const rn = String(roomName || "").trim().slice(0, 40) || `Room ${code}`;
     const n = Number(numTeams);
     const teamCount = Number.isFinite(n) ? Math.min(8, Math.max(2, Math.round(n))) : 2;
 
     const room = {
       code,
       roomName: rn,
-
-      // ✅ persistent host reclaim key
-      hostKey: genHostKey(),
-
-      // ✅ current connected host socket (can change after reconnect)
       hostSocketId: socket.id,
+      hostKey,
+      hostLastSeenMs: now(),
+      hostGraceTimeout: null,
 
       settings: { tossupSeconds: DEFAULT_TOSSUP_SECONDS, bonusSeconds: DEFAULT_BONUS_SECONDS },
       teams: new Map(),
@@ -263,14 +263,13 @@ io.on("connection", (socket) => {
       name: (hostName?.trim() || "Host").slice(0, 24),
       teamId: null,
       isHost: true,
-      isSpectator: true // ✅ host is never on teams
+      isSpectator: false
     });
 
     rooms.set(code, room);
     socket.join(code);
 
-    // ✅ send hostKey only to creator
-    socket.emit("room_created", { code, hostKey: room.hostKey });
+    socket.emit("room_created", { code, hostKey });
     broadcast(room);
   });
 
@@ -293,32 +292,36 @@ io.on("connection", (socket) => {
     if (typeof ack === "function") ack(payload);
   });
 
-  socket.on("host_set_room_name", ({ code, roomName }) => {
+  socket.on("host_set_room_name", ({ code, roomName, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
-    if (!room || !requireHost(room, socket)) return;
+    if (!room || !requireHost(room, socket, hostKey)) return;
+
     const rn = String(roomName || "").trim().slice(0, 40);
     if (!rn) return;
     room.roomName = rn;
     broadcast(room);
   });
 
-  socket.on("host_set_team_name", ({ code, teamId, name }) => {
+  socket.on("host_set_team_name", ({ code, teamId, name, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
-    if (!room || !requireHost(room, socket)) return;
+    if (!room || !requireHost(room, socket, hostKey)) return;
+
     const t = room.teams.get(teamId);
     if (!t) return;
+
     const nm = String(name || "").trim().slice(0, 24);
     if (!nm) return;
+
     t.name = nm;
     broadcast(room);
   });
 
-  socket.on("host_delete_tossup_row", ({ code, num }) => {
+  socket.on("host_delete_tossup_row", ({ code, num, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
-    if (!room || !requireHost(room, socket)) return;
+    if (!room || !requireHost(room, socket, hostKey)) return;
 
     if (!room.match || !Array.isArray(room.match.rows)) return;
 
@@ -333,36 +336,48 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // ✅ join_room now supports host reclaim: { hostKey }
   socket.on("join_room", ({ code, name, teamId, spectate, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
     if (!room) return;
 
     socket.join(code);
-
     const nm = (String(name || "Player").trim() || "Player").slice(0, 24);
 
-    // ✅ If correct hostKey, reclaim host role on THIS socket
-    if (hostKey && hostKey === room.hostKey) {
+    // --- Host reclaim path ---
+    if (hostKey && room.hostKey && hostKey === room.hostKey) {
+      // Clear grace shutdown timer if running
+      if (room.hostGraceTimeout) {
+        clearTimeout(room.hostGraceTimeout);
+        room.hostGraceTimeout = null;
+      }
+
+      // Remove any previous host player entry (old socket id)
+      if (room.hostSocketId && room.players.has(room.hostSocketId)) {
+        room.players.delete(room.hostSocketId);
+      }
+
       room.hostSocketId = socket.id;
+      room.hostLastSeenMs = now();
 
       room.players.set(socket.id, {
         socketId: socket.id,
         name: nm || "Host",
         teamId: null,
         isHost: true,
-        isSpectator: true
+        isSpectator: false
       });
 
       broadcast(room);
       return;
     }
 
-    const existing = room.players.get(socket.id);
-    if (existing && existing.isHost) return; // don't overwrite host
-
+    // Normal spectator
     if (spectate) {
+      // never overwrite the host if hostSocketId changes later
+      const existing = room.players.get(socket.id);
+      if (existing?.isHost) return;
+
       room.players.set(socket.id, {
         socketId: socket.id,
         name: nm,
@@ -390,14 +405,13 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // no switching after join
   socket.on("set_team", () => {});
 
   /* ---- Toss-up controls ---- */
-  socket.on("host_start_tossup_reading", ({ code }) => {
+  socket.on("host_start_tossup_reading", ({ code, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
-    if (!room || !requireHost(room, socket)) return;
+    if (!room || !requireHost(room, socket, hostKey)) return;
     if (room.phase.startsWith("bonus")) return;
 
     clearTossupEndTimeout(room);
@@ -414,10 +428,10 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  socket.on("host_done_reading_tossup", ({ code }) => {
+  socket.on("host_done_reading_tossup", ({ code, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
-    if (!room || !requireHost(room, socket)) return;
+    if (!room || !requireHost(room, socket, hostKey)) return;
     if (room.phase.startsWith("bonus")) return;
 
     room.phase = "tossup_live";
@@ -459,32 +473,31 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  socket.on("host_clear_buzz", ({ code }) => {
+  socket.on("host_clear_buzz", ({ code, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
-    if (!room || !requireHost(room, socket)) return;
+    if (!room || !requireHost(room, socket, hostKey)) return;
 
     clearBuzz(room);
 
     if (room.phase === "tossup_live" && room.timer.running) scheduleTossupEnd(room);
-
     broadcast(room);
   });
 
-  socket.on("host_set_interrupt_choice", ({ code, interrupt }) => {
+  socket.on("host_set_interrupt_choice", ({ code, interrupt, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
-    if (!room || !requireHost(room, socket)) return;
+    if (!room || !requireHost(room, socket, hostKey)) return;
     if (!room.buzz.locked) return;
 
     room.buzz.interruptChoice = !!interrupt;
     broadcast(room);
   });
 
-  socket.on("host_mark_answer", ({ code, correct }) => {
+  socket.on("host_mark_answer", ({ code, correct, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
-    if (!room || !requireHost(room, socket)) return;
+    if (!room || !requireHost(room, socket, hostKey)) return;
     if (!room.buzz.locked) return;
 
     const teamId = room.buzz.winnerTeamId;
@@ -512,11 +525,12 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // incorrect
     lockOutTeam();
     clearBuzz(room);
 
     if (interrupt) {
-      // NEG: +4 to EVERY other team (counts under P for each benefiting team)
+      // NEG: +4 to EVERY other team
       for (const [otherId, other] of room.teams.entries()) {
         if (otherId === teamId) continue;
         other.score += 4;
@@ -532,6 +546,7 @@ io.on("connection", (socket) => {
       broadcast(room);
       return;
     } else {
+      // Not interrupt incorrect: no neg, reset 5s timer and run
       room.phase = "tossup_live";
       resetTimerFull(room, "tossup", true);
       scheduleTossupEnd(room);
@@ -542,10 +557,10 @@ io.on("connection", (socket) => {
   });
 
   /* ---- Bonus ---- */
-  socket.on("host_done_reading_bonus", ({ code }) => {
+  socket.on("host_done_reading_bonus", ({ code, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
-    if (!room || !requireHost(room, socket)) return;
+    if (!room || !requireHost(room, socket, hostKey)) return;
     if (room.phase !== "bonus_reading" && room.phase !== "bonus_live") return;
 
     room.phase = "bonus_live";
@@ -553,10 +568,10 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  socket.on("host_award_bonus", ({ code, points }) => {
+  socket.on("host_award_bonus", ({ code, points, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
-    if (!room || !requireHost(room, socket)) return;
+    if (!room || !requireHost(room, socket, hostKey)) return;
     if (!room.phase.startsWith("bonus")) return;
 
     const teamId = room.activeBonusTeamId;
@@ -579,10 +594,10 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  socket.on("host_skip_bonus", ({ code }) => {
+  socket.on("host_skip_bonus", ({ code, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
-    if (!room || !requireHost(room, socket)) return;
+    if (!room || !requireHost(room, socket, hostKey)) return;
     if (!room.phase.startsWith("bonus")) return;
 
     room.phase = "lobby";
@@ -603,9 +618,26 @@ io.on("connection", (socket) => {
       room.players.delete(socket.id);
 
       if (wasHost) {
-        // ✅ DO NOT delete the room; keep it reclaimable by hostKey
+        // DO NOT delete the room immediately.
         room.hostSocketId = null;
-        io.to(room.code).emit("error_msg", "Host disconnected. Reopen the host link to reclaim Official.");
+        room.hostLastSeenMs = now();
+
+        if (room.hostGraceTimeout) clearTimeout(room.hostGraceTimeout);
+        room.hostGraceTimeout = setTimeout(() => {
+          const r = rooms.get(room.code);
+          if (!r) return;
+          // If host still not reclaimed, close room.
+          if (!r.hostSocketId) {
+            io.to(r.code).emit("error_msg", "Host did not reconnect. Room closed.");
+            clearTossupEndTimeout(r);
+            rooms.delete(r.code);
+          }
+        }, HOST_GRACE_MS);
+
+        io.to(room.code).emit(
+          "error_msg",
+          "Host disconnected — waiting for host to reconnect (host link keeps host)."
+        );
         broadcast(room);
       } else {
         broadcast(room);
