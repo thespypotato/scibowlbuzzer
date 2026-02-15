@@ -8,6 +8,11 @@ const getRoomFromURL = () => {
   return path || null;
 };
 
+const getHostKeyFromURL = () => {
+  const u = new URL(window.location.href);
+  return u.searchParams.get("host");
+};
+
 function msToSec(ms) {
   return Math.max(0, Math.ceil(ms / 1000));
 }
@@ -26,6 +31,7 @@ export default function App() {
   const [code, setCode] = useState("");
   const [state, setState] = useState(null);
   const [error, setError] = useState("");
+  const [scoreboardOpen, setScoreboardOpen] = useState(true);
 
   const [tick, setTick] = useState(Date.now());
   useEffect(() => {
@@ -86,9 +92,7 @@ export default function App() {
     const buf = buzzBufRef.current;
     if (!ctx || !buf) return;
 
-    if (ctx.state === "suspended") {
-      ctx.resume().catch(() => {});
-    }
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
 
     try {
       const src = ctx.createBufferSource();
@@ -103,31 +107,61 @@ export default function App() {
     } catch {}
   }
 
+  const emit = (evt, payload) => socketRef.current?.emit(evt, payload);
+
+  const [socketReady, setSocketReady] = useState(false);
+
   // socket setup
   useEffect(() => {
-    const s = io(SERVER_URL, { transports: ["polling", "websocket"] });
+    const s = io(SERVER_URL, {
+      transports: ["polling", "websocket"],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 500,
+      reconnectionDelayMax: 2000,
+      timeout: 20000
+    });
+
     socketRef.current = s;
 
-    s.on("room_created", ({ code }) => {
+    s.on("connect", () => setSocketReady(true));
+
+    s.on("room_created", ({ code, hostKey }) => {
       setCode(code);
       setAppMode("room");
-      window.history.replaceState(null, "", `/${code}`);
+
+      if (hostKey) {
+        localStorage.setItem(`sb_hostkey_${code}`, hostKey);
+        window.history.replaceState(null, "", `/${code}?host=${hostKey}`);
+      } else {
+        window.history.replaceState(null, "", `/${code}`);
+      }
     });
 
     s.on("state", (st) => {
       setState(st);
-      if (st?.code && window.location.pathname !== `/${st.code}`) {
-        window.history.replaceState(null, "", `/${st.code}`);
+
+      // Keep URL in sync:
+      // - host keeps /CODE?host=...
+      // - everyone else stays /CODE
+      if (st?.code) {
+        const hostKeyInUrl = getHostKeyFromURL();
+        const storedHostKey = localStorage.getItem(`sb_hostkey_${st.code}`) || null;
+
+        const isProbablyHost =
+          hostKeyInUrl === storedHostKey && !!hostKeyInUrl;
+
+        const desired = isProbablyHost ? `/${st.code}?host=${hostKeyInUrl}` : `/${st.code}`;
+
+        if (window.location.pathname + window.location.search !== desired) {
+          window.history.replaceState(null, "", desired);
+        }
       }
     });
 
     s.on("error_msg", (msg) => {
       setError(String(msg || "Error"));
       setTimeout(() => setError(""), 3000);
-    });
-    s.on("room_peek", (info) => {
-      setPeek(info);
-      console.log("PEEK", info);
     });
 
     return () => {
@@ -136,16 +170,35 @@ export default function App() {
     };
   }, []);
 
-  const emit = (evt, payload) => socketRef.current?.emit(evt, payload);
-
-  // Auto-open join screen if URL is /ROOMCODE
+  // Auto behavior based on URL:
+  // - /ROOMCODE?host=... => reclaim host immediately
+  // - /ROOMCODE => open join screen
   useEffect(() => {
+    if (!socketReady) return;
+
     const c = getRoomFromURL();
-    if (c) {
-      setCode(c.toUpperCase());
+    if (!c) return;
+
+    const roomCode = c.toUpperCase();
+    const hostKey = getHostKeyFromURL();
+
+    setCode(roomCode);
+
+    if (hostKey) {
+      // reclaim host
+      setAppMode("room");
+      emit("join_room", {
+        code: roomCode,
+        name: name || "Host",
+        spectate: true,
+        teamId: null,
+        hostKey
+      });
+    } else {
       setAppMode("join");
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socketReady]);
 
   // play sound when a new buzz locks in
   const prevBuzzLockedRef = useRef(false);
@@ -159,7 +212,6 @@ export default function App() {
     const prevAt = prevBuzzAtRef.current;
 
     if (!prevLocked && locked) {
-      // server-confirmed buzz
       if (at !== prevAt) playBuzzSound();
     }
 
@@ -173,7 +225,7 @@ export default function App() {
   const teams = state?.teams || [];
   const players = state?.players || [];
   const phase = state?.phase || "lobby";
-
+  const isLive = phase === "tossup_live" || phase === "bonus_live";
   const me = useMemo(() => {
     if (!mySocketId) return null;
     return players.find((p) => p.socketId === mySocketId) || null;
@@ -216,7 +268,7 @@ export default function App() {
     emit("create_room", {
       hostName: name || "Host",
       roomName: createRoomName,
-      numTeams: createTeams
+      numTeams: Number(createTeams)
     });
   };
 
@@ -226,22 +278,20 @@ export default function App() {
   const [peek, setPeek] = useState(null);
 
   const loadTeams = () => {
-  setPeek(null);
+    setPeek(null);
 
-  const s = socketRef.current;
-  if (!s) return;
+    const s = socketRef.current;
+    if (!s) return;
 
-  s.emit("peek_room", { code }, (resp) => {
-    if (!resp?.ok) {
-      setError(resp?.error || "Failed to load teams.");
-      setTimeout(() => setError(""), 3000);
-      return;
-    }
-    setPeek(resp);
-  });
-};
-
-
+    s.emit("peek_room", { code }, (resp) => {
+      if (!resp?.ok) {
+        setError(resp?.error || "Failed to load teams.");
+        setTimeout(() => setError(""), 3000);
+        return;
+      }
+      setPeek(resp);
+    });
+  };
 
   const doJoin = () => {
     emit("join_room", {
@@ -309,6 +359,16 @@ export default function App() {
     return "Clock Stopped";
   })();
 
+  const backToHome = () => {
+    setState(null);
+    setPeek(null);
+    setJoinTeamId("");
+    setJoinSpectate(false);
+    setCode("");
+    setAppMode("home");
+    window.history.replaceState(null, "", "/"); // ✅ reset URL
+  };
+
   return (
     <div className="page">
       <header className="topbar">
@@ -316,12 +376,12 @@ export default function App() {
           <div className="clock-title">{state ? clockStatus : "Science Bowl"}</div>
           <div className="clock-sub">
             Timer: <b>{state ? `${remainingSec}s` : "—"}</b>{" "}
-            <span className="muted">({peek?.timer?.mode || "stopped"})</span>
+            <span className="muted">({state?.timer?.mode || "stopped"})</span>
           </div>
         </div>
 
         <div className="topbar-center">
-          <div className="roomname-view">{state?.roomName || "—"}</div>
+          <div className="roomname-view">{state?.roomName || peek?.roomName || "—"}</div>
           <div className="roomcode">{state ? <>Code: <b>{state.code}</b></> : null}</div>
         </div>
 
@@ -378,7 +438,15 @@ export default function App() {
         <div className="card auth">
           <h1 className="title">Create Room</h1>
 
-          <label className="label">Room name</label>
+          <label className="label">Your name</label>
+          <input
+            className="input"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Your Name"
+          />
+
+          <label className="label" style={{ marginTop: 10 }}>Room name</label>
           <input className="input" value={createRoomName} onChange={(e) => setCreateRoomName(e.target.value)} />
 
           <label className="label" style={{ marginTop: 10 }}>Number of teams (2–8)</label>
@@ -390,17 +458,10 @@ export default function App() {
             value={createTeams}
             onChange={(e) => setCreateTeams(e.target.value)}
           />
-          <label className="label">Your name</label>
-            <input
-              className="input"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Your Name"
-            />
 
           <div className="host-actions" style={{ marginTop: 12 }}>
             <button className="btn" onClick={doCreate}>Create</button>
-            <button className="btn btn-soft" onClick={() => setAppMode("home")}>Back</button>
+            <button className="btn btn-soft" onClick={backToHome}>Back</button>
           </div>
         </div>
       )}
@@ -408,13 +469,15 @@ export default function App() {
       {appMode === "join" && (
         <div className="card auth">
           <h1 className="title">Join Room</h1>
+
           <label className="label">Your name</label>
-<input
-  className="input"
-  value={name}
-  onChange={(e) => setName(e.target.value)}
-  placeholder="Your Name"
-/>
+          <input
+            className="input"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Your Name"
+          />
+
           <label className="label">Room code</label>
           <input
             className="input"
@@ -431,7 +494,7 @@ export default function App() {
             <button className="btn btn-soft" onClick={loadTeams} disabled={!code.trim()}>
               Load Teams
             </button>
-            <button className="btn btn-soft" onClick={() => { setState(null); setAppMode("home"); }}>
+            <button className="btn btn-soft" onClick={backToHome}>
               Back
             </button>
           </div>
@@ -481,7 +544,6 @@ export default function App() {
           ) : null}
         </div>
       )}
-
 
       {appMode === "room" && !state && (
         <div className="card auth" style={{ marginTop: 12 }}>
@@ -586,11 +648,18 @@ export default function App() {
                 {isHost ? (
                   <div className="hostbox">
                     <div className="host-actions">
-                      <button className="btn" onClick={startTossup} disabled={phase.startsWith("bonus")}>
+                      <button
+                        className={`btn ${isLive ? "btn-live" : ""}`}
+                        onClick={startTossup}
+                        disabled={phase.startsWith("bonus")}
+                      >
                         Start Toss-Up
                       </button>
                       <button className="btn btn-soft" onClick={doneReadingTossup} disabled={phase.startsWith("bonus")}>
                         Done Reading Toss-Up
+                      </button>
+                      <button className="btn btn-soft" onClick={backToHome} title="Leave to main menu">
+                        Main Menu
                       </button>
                     </div>
 
@@ -635,16 +704,29 @@ export default function App() {
                       </div>
                     ) : null}
                   </div>
-                ) : null}
+                ) : (
+                  <div className="host-actions" style={{ marginTop: 12 }}>
+                    <button className="btn btn-soft" onClick={backToHome}>Main Menu</button>
+                  </div>
+                )}
               </div>
             </section>
           </main>
+                  <section className={`scoreboard card ${scoreboardOpen ? "open" : "closed"}`}>
+  <button
+    className="scoreboard-toggle"
+    onClick={() => setScoreboardOpen((v) => !v)}
+    aria-expanded={scoreboardOpen}
+    title="Toggle scoreboard"
+  >
+    <span>Scoreboard</span>
+    <span className="scoreboard-caret">{scoreboardOpen ? "▾" : "▸"}</span>
+  </button>
 
-          <section className="scoreboard card">
-            <div className="scoreboard-title">Scoreboard</div>
-
-            <div className="scoreboard-scroll">
-              <table className="scoreboard-table">
+  {scoreboardOpen ? (
+    <>
+      <div className="scoreboard-scroll">
+        <table className="scoreboard-table">
                 <thead>
                   <tr>
                     <th className="sticky-col">#</th>
@@ -688,7 +770,6 @@ export default function App() {
                         ) : null}
                       </td>
 
-
                       {teams.map((t) => {
                         const v = row.teams?.[t.id] || {};
                         return (
@@ -704,12 +785,10 @@ export default function App() {
                   ))}
                 </tbody>
               </table>
-            </div>
-
-            <div className="muted small" style={{ marginTop: 8 }}>
-
-            </div>
-          </section>
+      </div>
+    </>
+  ) : null}
+</section>  
         </>
       )}
     </div>

@@ -3,6 +3,7 @@ import http from "http";
 import cors from "cors";
 import { Server } from "socket.io";
 import { nanoid } from "nanoid";
+import crypto from "crypto";
 
 const app = express();
 app.use((req, _res, next) => {
@@ -13,7 +14,6 @@ app.use((req, _res, next) => {
 app.use(cors({ origin: true, credentials: true }));
 app.get("/", (_, res) => res.send("ok"));
 app.get("/health", (_, res) => res.json({ ok: true }));
-
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: true, credentials: true } });
@@ -29,6 +29,10 @@ function genCode() {
   let code = "";
   for (let i = 0; i < 6; i++) code += alphabet[Math.floor(Math.random() * alphabet.length)];
   return code;
+}
+
+function genHostKey() {
+  return crypto.randomBytes(16).toString("hex"); // secret host reclaim token
 }
 
 function requireRoom(code, socket) {
@@ -145,11 +149,10 @@ function refreshRowScores(room) {
     if (row.teams[id]) row.teams[id].score = t.score;
   }
 }
+
 function recomputeFromRows(room) {
   // Reset team scores
-  for (const t of room.teams.values()) {
-    t.score = 0;
-  }
+  for (const t of room.teams.values()) t.score = 0;
 
   // Replay remaining rows in order
   for (const row of room.match.rows) {
@@ -177,10 +180,6 @@ function clearBuzz(room) {
   room.buzz = { locked: false };
 }
 
-function otherTeamId(room, teamId) {
-  return [...room.teams.keys()].find((id) => id !== teamId) || null;
-}
-
 /* ---------------- State + broadcast ---------------- */
 function publicState(room) {
   const teams = [...room.teams.values()].map((t) => ({ ...t }));
@@ -206,7 +205,7 @@ function publicState(room) {
   return {
     code: room.code,
     roomName: room.roomName,
-    hostSocketId: room.hostSocketId,
+    hostSocketId: room.hostSocketId, // current live host socket (can be null if host offline)
     settings: room.settings,
     teams,
     players,
@@ -215,7 +214,7 @@ function publicState(room) {
     buzz,
     timer: computeTimerSnapshot(room),
     tossupLockedTeams: [...room.tossupLockedTeams],
-    match: room.match // <-- REQUIRED for scoreboard updates
+    match: room.match
   };
 }
 
@@ -235,11 +234,17 @@ io.on("connection", (socket) => {
     const room = {
       code,
       roomName: rn,
+
+      // ✅ persistent host reclaim key
+      hostKey: genHostKey(),
+
+      // ✅ current connected host socket (can change after reconnect)
       hostSocketId: socket.id,
+
       settings: { tossupSeconds: DEFAULT_TOSSUP_SECONDS, bonusSeconds: DEFAULT_BONUS_SECONDS },
       teams: new Map(),
       players: new Map(),
-      phase: "lobby", // lobby | tossup_reading | tossup_live | tossup_closed | bonus_reading | bonus_live
+      phase: "lobby",
       activeBonusTeamId: null,
       tossupLockedTeams: new Set(),
       buzz: { locked: false },
@@ -258,34 +263,35 @@ io.on("connection", (socket) => {
       name: (hostName?.trim() || "Host").slice(0, 24),
       teamId: null,
       isHost: true,
-      isSpectator: false
+      isSpectator: true // ✅ host is never on teams
     });
 
     rooms.set(code, room);
     socket.join(code);
-    socket.emit("room_created", { code });
+
+    // ✅ send hostKey only to creator
+    socket.emit("room_created", { code, hostKey: room.hostKey });
     broadcast(room);
   });
-socket.on("peek_room", ({ code }, ack) => {
-  code = String(code || "").toUpperCase().trim();
-  const room = rooms.get(code);
 
-  if (!room) {
-    if (typeof ack === "function") ack({ ok: false, error: "Room not found." });
-    return;
-  }
+  socket.on("peek_room", ({ code }, ack) => {
+    code = String(code || "").toUpperCase().trim();
+    const room = rooms.get(code);
 
-  const payload = {
-    ok: true,
-    code: room.code,
-    roomName: room.roomName,
-    teams: [...room.teams.values()].map((t) => ({ id: t.id, name: t.name }))
-  };
+    if (!room) {
+      if (typeof ack === "function") ack({ ok: false, error: "Room not found." });
+      return;
+    }
 
-  if (typeof ack === "function") ack(payload);
-});
+    const payload = {
+      ok: true,
+      code: room.code,
+      roomName: room.roomName,
+      teams: [...room.teams.values()].map((t) => ({ id: t.id, name: t.name }))
+    };
 
-
+    if (typeof ack === "function") ack(payload);
+  });
 
   socket.on("host_set_room_name", ({ code, roomName }) => {
     code = String(code || "").toUpperCase().trim();
@@ -308,6 +314,7 @@ socket.on("peek_room", ({ code }, ack) => {
     t.name = nm;
     broadcast(room);
   });
+
   socket.on("host_delete_tossup_row", ({ code, num }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
@@ -321,29 +328,39 @@ socket.on("peek_room", ({ code }, ack) => {
     const idx = room.match.rows.findIndex((r) => r.num === n);
     if (idx === -1) return;
 
-    // Remove that toss-up row
     room.match.rows.splice(idx, 1);
-
-    // Recompute team scores + row score snapshots
     recomputeFromRows(room);
-
     broadcast(room);
   });
 
-  socket.on("join_room", ({ code, name, teamId, spectate }) => {
+  // ✅ join_room now supports host reclaim: { hostKey }
+  socket.on("join_room", ({ code, name, teamId, spectate, hostKey }) => {
     code = String(code || "").toUpperCase().trim();
     const room = requireRoom(code, socket);
-    
     if (!room) return;
-    const existing = room.players.get(socket.id);
-if (existing && existing.isHost) {
-  // Never overwrite the host record
-  return;
-}
 
     socket.join(code);
 
     const nm = (String(name || "Player").trim() || "Player").slice(0, 24);
+
+    // ✅ If correct hostKey, reclaim host role on THIS socket
+    if (hostKey && hostKey === room.hostKey) {
+      room.hostSocketId = socket.id;
+
+      room.players.set(socket.id, {
+        socketId: socket.id,
+        name: nm || "Host",
+        teamId: null,
+        isHost: true,
+        isSpectator: true
+      });
+
+      broadcast(room);
+      return;
+    }
+
+    const existing = room.players.get(socket.id);
+    if (existing && existing.isHost) return; // don't overwrite host
 
     if (spectate) {
       room.players.set(socket.id, {
@@ -391,7 +408,6 @@ if (existing && existing.isHost) {
     clearBuzz(room);
     resetTimerFull(room, "tossup", false);
 
-    // MATCH LOG: new row per toss-up
     startNewTossupRow(room);
     refreshRowScores(room);
 
@@ -426,7 +442,6 @@ if (existing && existing.isHost) {
     if (room.tossupLockedTeams.has(p.teamId)) return;
     if (room.buzz.locked) return;
 
-    // if timer live, stop it and cancel end timeout
     if (room.phase === "tossup_live") {
       stopTimer(room);
       clearTossupEndTimeout(room);
@@ -451,7 +466,6 @@ if (existing && existing.isHost) {
 
     clearBuzz(room);
 
-    // if tossup live and timer still running, reschedule end
     if (room.phase === "tossup_live" && room.timer.running) scheduleTossupEnd(room);
 
     broadcast(room);
@@ -483,7 +497,6 @@ if (existing && existing.isHost) {
     const lockOutTeam = () => room.tossupLockedTeams.add(teamId);
 
     if (correct) {
-      // TU correct = +4 (per toss-up delta)
       team.score += 4;
       addRowDelta(room, teamId, "tu", 4);
       refreshRowScores(room);
@@ -499,20 +512,17 @@ if (existing && existing.isHost) {
       return;
     }
 
-    // incorrect
     lockOutTeam();
     clearBuzz(room);
 
     if (interrupt) {
-      // NEG: +4 to other team (counts under P for benefiting team)
       // NEG: +4 to EVERY other team (counts under P for each benefiting team)
-for (const [otherId, other] of room.teams.entries()) {
-  if (otherId === teamId) continue;
-  other.score += 4;
-  addRowDelta(room, otherId, "p", 4);
-}
-refreshRowScores(room);
-
+      for (const [otherId, other] of room.teams.entries()) {
+        if (otherId === teamId) continue;
+        other.score += 4;
+        addRowDelta(room, otherId, "p", 4);
+      }
+      refreshRowScores(room);
 
       clearTossupEndTimeout(room);
 
@@ -522,7 +532,6 @@ refreshRowScores(room);
       broadcast(room);
       return;
     } else {
-      // Not interrupt incorrect: no neg, reset 5s timer and run
       room.phase = "tossup_live";
       resetTimerFull(room, "tossup", true);
       scheduleTossupEnd(room);
@@ -590,12 +599,14 @@ refreshRowScores(room);
       if (!room.players.has(socket.id)) continue;
 
       const wasHost = room.hostSocketId === socket.id;
+
       room.players.delete(socket.id);
 
       if (wasHost) {
-        io.to(room.code).emit("error_msg", "Host disconnected. Room closed.");
-        clearTossupEndTimeout(room);
-        rooms.delete(room.code);
+        // ✅ DO NOT delete the room; keep it reclaimable by hostKey
+        room.hostSocketId = null;
+        io.to(room.code).emit("error_msg", "Host disconnected. Reopen the host link to reclaim Official.");
+        broadcast(room);
       } else {
         broadcast(room);
       }
