@@ -83,7 +83,9 @@ export default function App() {
     return () => {
       window.removeEventListener("pointerdown", unlock);
       window.removeEventListener("keydown", unlock);
-      try { ctx.close(); } catch {}
+      try {
+        ctx.close();
+      } catch {}
     };
   }, []);
 
@@ -141,16 +143,11 @@ export default function App() {
     s.on("state", (st) => {
       setState(st);
 
-      // Keep URL in sync:
-      // - host keeps /CODE?host=...
-      // - everyone else stays /CODE
       if (st?.code) {
         const hostKeyInUrl = getHostKeyFromURL();
         const storedHostKey = localStorage.getItem(`sb_hostkey_${st.code}`) || null;
 
-        const isProbablyHost =
-          hostKeyInUrl === storedHostKey && !!hostKeyInUrl;
-
+        const isProbablyHost = hostKeyInUrl === storedHostKey && !!hostKeyInUrl;
         const desired = isProbablyHost ? `/${st.code}?host=${hostKeyInUrl}` : `/${st.code}`;
 
         if (window.location.pathname + window.location.search !== desired) {
@@ -170,9 +167,7 @@ export default function App() {
     };
   }, []);
 
-  // Auto behavior based on URL:
-  // - /ROOMCODE?host=... => reclaim host immediately
-  // - /ROOMCODE => open join screen
+  // Auto behavior based on URL
   useEffect(() => {
     if (!socketReady) return;
 
@@ -185,7 +180,6 @@ export default function App() {
     setCode(roomCode);
 
     if (hostKey) {
-      // reclaim host
       setAppMode("room");
       emit("join_room", {
         code: roomCode,
@@ -225,7 +219,13 @@ export default function App() {
   const teams = state?.teams || [];
   const players = state?.players || [];
   const phase = state?.phase || "lobby";
-  const isLive = phase === "tossup_live" || phase === "bonus_live";
+
+  // ✅ your new rules:
+  // - button turns color whenever NOT tossup_closed
+  // - also disabled whenever NOT tossup_closed
+  const canStartNewTossup = phase === "tossup_closed";
+  const startBtnActive = !canStartNewTossup; // highlight when not closed
+
   const me = useMemo(() => {
     if (!mySocketId) return null;
     return players.find((p) => p.socketId === mySocketId) || null;
@@ -366,17 +366,19 @@ export default function App() {
     setJoinSpectate(false);
     setCode("");
     setAppMode("home");
-    window.history.replaceState(null, "", "/"); // ✅ reset URL
+    window.history.replaceState(null, "", "/");
   };
 
   return (
     <div className="page">
       <header className="topbar">
         <div className="topbar-left">
-          <div className="clock-title">{state ? clockStatus : "Science Bowl"}</div>
-          <div className="clock-sub">
-            Timer: <b>{state ? `${remainingSec}s` : "—"}</b>{" "}
-            <span className="muted">({state?.timer?.mode || "stopped"})</span>
+          <div className="timerbox">
+            <div className="clock-title">{state ? clockStatus : "Science Bowl"}</div>
+            <div className="clock-sub">
+              <span className="timerbig">{state ? `${remainingSec}s` : "—"}</span>
+              <span className="muted timersub">({state?.timer?.mode || "stopped"})</span>
+            </div>
           </div>
         </div>
 
@@ -555,10 +557,7 @@ export default function App() {
       {appMode === "room" && state && (
         <>
           <main className="main">
-            <section
-              className="teams"
-              style={{ gridTemplateColumns: teams.length <= 2 ? undefined : "repeat(2, 1fr)" }}
-            >
+            <section className="teams">
               {teams.map((t, idx) => {
                 const teamPlayers = playersByTeam.get(t.id) || [];
                 const isWinnerTeam = !!winnerTeamId && winnerTeamId === t.id;
@@ -566,7 +565,8 @@ export default function App() {
                 return (
                   <div
                     key={t.id}
-                    className={`teamcard ${idx % 2 === 0 ? "teamA" : "teamB"} ${isWinnerTeam ? "team-winner" : ""}`}
+                    className={`teamcard ${isWinnerTeam ? "team-winner" : ""}`}
+                    data-team-index={idx}
                   >
                     <div className="teamcard-header">
                       <div className="team-title">
@@ -649,15 +649,22 @@ export default function App() {
                   <div className="hostbox">
                     <div className="host-actions">
                       <button
-                        className={`btn ${isLive ? "btn-live" : ""}`}
+                        className={`btn ${startBtnActive ? "btn-live" : ""}`}
                         onClick={startTossup}
-                        disabled={phase.startsWith("bonus")}
+                        disabled={!canStartNewTossup}
+                        title={!canStartNewTossup ? "Start is enabled only when Toss-Up is closed." : "Start a new toss-up"}
                       >
                         Start Toss-Up
                       </button>
-                      <button className="btn btn-soft" onClick={doneReadingTossup} disabled={phase.startsWith("bonus")}>
+
+                      <button
+                        className="btn btn-soft"
+                        onClick={doneReadingTossup}
+                        disabled={phase.startsWith("bonus")}
+                      >
                         Done Reading Toss-Up
                       </button>
+
                       <button className="btn btn-soft" onClick={backToHome} title="Leave to main menu">
                         Main Menu
                       </button>
@@ -712,83 +719,84 @@ export default function App() {
               </div>
             </section>
           </main>
-                  <section className={`scoreboard card ${scoreboardOpen ? "open" : "closed"}`}>
-  <button
-    className="scoreboard-toggle"
-    onClick={() => setScoreboardOpen((v) => !v)}
-    aria-expanded={scoreboardOpen}
-    title="Toggle scoreboard"
-  >
-    <span>Scoreboard</span>
-    <span className="scoreboard-caret">{scoreboardOpen ? "▾" : "▸"}</span>
-  </button>
 
-  {scoreboardOpen ? (
-    <>
-      <div className="scoreboard-scroll">
-        <table className="scoreboard-table">
-                <thead>
-                  <tr>
-                    <th className="sticky-col">#</th>
-                    {teams.map((t) => (
-                      <th key={t.id} colSpan={4} className="team-group">
-                        {t.name}
-                      </th>
-                    ))}
-                  </tr>
-                  <tr>
-                    <th className="sticky-col subhead"></th>
-                    {teams.map((t) => (
-                      <React.Fragment key={t.id}>
-                        <th className="subhead">P</th>
-                        <th className="subhead">TU</th>
-                        <th className="subhead">B</th>
-                        <th className="subhead">Score</th>
-                      </React.Fragment>
-                    ))}
-                  </tr>
-                </thead>
+          <section className={`scoreboard card ${scoreboardOpen ? "open" : "closed"}`}>
+            <button
+              className="scoreboard-toggle"
+              onClick={() => setScoreboardOpen((v) => !v)}
+              aria-expanded={scoreboardOpen}
+              title="Toggle scoreboard"
+            >
+              <span>Scoreboard</span>
+              <span className="scoreboard-caret">{scoreboardOpen ? "▾" : "▸"}</span>
+            </button>
 
-                <tbody>
-                  {(state.match?.rows || []).map((row) => (
-                    <tr key={row.num}>
-                      <td className="sticky-col rownum">
-                        {row.num}
-                        {isHost ? (
-                          <button
-                            className="btn btn-soft"
-                            style={{ marginLeft: 8, padding: "4px 8px" }}
-                            onClick={() => {
-                              if (confirm(`Delete toss-up #${row.num}?`)) {
-                                emit("host_delete_tossup_row", { code: state.code, num: row.num });
-                              }
-                            }}
-                            title="Delete this toss-up"
-                          >
-                            ✕
-                          </button>
-                        ) : null}
-                      </td>
-
-                      {teams.map((t) => {
-                        const v = row.teams?.[t.id] || {};
-                        return (
+            {scoreboardOpen ? (
+              <>
+                <div className="scoreboard-scroll">
+                  <table className="scoreboard-table">
+                    <thead>
+                      <tr>
+                        <th className="sticky-col">#</th>
+                        {teams.map((t) => (
+                          <th key={t.id} colSpan={4} className="team-group">
+                            {t.name}
+                          </th>
+                        ))}
+                      </tr>
+                      <tr>
+                        <th className="sticky-col subhead"></th>
+                        {teams.map((t) => (
                           <React.Fragment key={t.id}>
-                            <td>{v.p || ""}</td>
-                            <td>{v.tu || ""}</td>
-                            <td>{v.b || ""}</td>
-                            <td><b>{v.score ?? 0}</b></td>
+                            <th className="subhead">P</th>
+                            <th className="subhead">TU</th>
+                            <th className="subhead">B</th>
+                            <th className="subhead">Score</th>
                           </React.Fragment>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-      </div>
-    </>
-  ) : null}
-</section>  
+                        ))}
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {(state.match?.rows || []).map((row) => (
+                        <tr key={row.num}>
+                          <td className="sticky-col rownum">
+                            {row.num}
+                            {isHost ? (
+                              <button
+                                className="btn btn-soft"
+                                style={{ marginLeft: 8, padding: "4px 8px" }}
+                                onClick={() => {
+                                  if (confirm(`Delete toss-up #${row.num}?`)) {
+                                    emit("host_delete_tossup_row", { code: state.code, num: row.num });
+                                  }
+                                }}
+                                title="Delete this toss-up"
+                              >
+                                ✕
+                              </button>
+                            ) : null}
+                          </td>
+
+                          {teams.map((t) => {
+                            const v = row.teams?.[t.id] || {};
+                            return (
+                              <React.Fragment key={t.id}>
+                                <td>{v.p || ""}</td>
+                                <td>{v.tu || ""}</td>
+                                <td>{v.b || ""}</td>
+                                <td><b>{v.score ?? 0}</b></td>
+                              </React.Fragment>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : null}
+          </section>
         </>
       )}
     </div>
